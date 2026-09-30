@@ -1,0 +1,4 @@
+# What build-wheel.sh downloads and writes when run from a checkout.
+/src/
+/wheelhouse/
+/build-*.log

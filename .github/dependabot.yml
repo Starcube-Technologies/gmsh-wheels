@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One pull request a week at most: each one reruns both builds.
+    groups:
+      actions:
+        patterns: ["*"]
