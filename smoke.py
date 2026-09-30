@@ -34,4 +34,6 @@ assert n3 > 0, "no 3D elements"
 out = Path(tempfile.mkdtemp()) / "smoke.msh"
 gmsh.write(str(out))
 gmsh.finalize()
-print(f"smoke ok: {n3} tetrahedra, {out.stat().st_size} bytes of .msh, python {sys.version.split()[0]}")
+print(
+    f"smoke ok: {n3} tetrahedra, {out.stat().st_size} bytes of .msh, python {sys.version.split()[0]}"
+)

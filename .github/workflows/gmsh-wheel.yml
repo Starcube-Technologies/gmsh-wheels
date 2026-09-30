@@ -29,6 +29,12 @@ env:
   # The whole toolchain (GCC, binutils, CMake, Python, auditwheel) comes from this image, pinned
   # by digest so that a rebuild uses the same compiler. A new digest means a new build number.
   IMAGE: quay.io/pypa/manylinux_2_28_aarch64@sha256:acc4e63610fef1da3d687322793665205415c2b22c0d2e403f1a44eb834d63fc
+  # The wheel both legs must produce, and the only one the publish job uploads.
+  WHEEL: gmsh-4.15.2-py2.py3-none-manylinux_2_28_aarch64.whl
+  # The bare container the smoke test installs the wheel into: python:3.12-slim (3.12.14 on
+  # Debian trixie) as of 2026-09-30, pinned by its multi-platform index digest. Its linux/arm64
+  # image is sha256:950206c37262dd86c55659797f6ee418fee30535072f65a82ed470d985f5cda5.
+  SMOKE_IMAGE: python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
 defaults:
   run:
@@ -84,6 +90,10 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    outputs:
+      # The sha256 of the wheel both legs built. The publish job uploads a wheel only if it
+      # hashes to exactly this.
+      sha256: ${{ steps.compare.outputs.sha256 }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -115,7 +125,12 @@ jobs:
             echo "| b | ${wb[0]#b/} | $hb |"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$ha" = "$hb" ] && [ "${wa[0]#a/}" = "${wb[0]#b/}" ]; then
+            if [ "${wa[0]#a/}" != "$WHEEL" ]; then
+              echo "::error::The builds agree, but the wheel is named ${wa[0]#a/} rather than $WHEEL."
+              exit 1
+            fi
             echo "The two builds are byte-identical."
+            echo "sha256=$ha" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "differ=true" >> "$GITHUB_OUTPUT"
@@ -163,10 +178,14 @@ jobs:
           docker run --rm -w /tmp \
             -e PIP_DISABLE_PIP_VERSION_CHECK=1 -e PIP_ROOT_USER_ACTION=ignore \
             -v "$PWD/dist":/dist:ro -v "$PWD/smoke.py":/smoke.py:ro \
-            python:3.12-slim sh -c 'pip install --no-index /dist/*.whl && python /smoke.py'
+            "$SMOKE_IMAGE" sh -c 'pip install --no-index /dist/*.whl && python /smoke.py'
 
+      # uv is pinned to one release, and its download is checked against the sha256 that
+      # release publishes for uv-aarch64-unknown-linux-gnu.tar.gz.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
+          version: 0.12.21
+          checksum: 030b69227b40af8c1981b7301793dc66e71ed3c796ea8688209dd268bd91ec51
           enable-cache: false
 
       # uv puts the wheel's .data/data/lib/libgmsh.so under <venv>/lib, where gmsh.py looks for
@@ -189,6 +208,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       BUILD: ${{ inputs.build }}
+      VERIFIED_SHA256: ${{ needs.reproduce.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -213,40 +233,46 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      # Each artifact goes to its own folder, by name. A download never merges into another, so
+      # no other artifact of this run can put a file where the wheel is read from.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: wheel-a
-          path: dist
+          path: wheel
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: build-log-*
-          merge-multiple: true
-          path: dist
+          name: build-log-a
+          path: logs/a
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-log-b
+          path: logs/b
 
       # The release carries the sources as the GPL's corresponding source. The script checks them
       # against the same pinned sha256 the builds used, so these are the bytes that were built.
       - name: Fetch and verify the sources
-        run: |
-          bash build-wheel.sh --fetch-only
-          cp src/gmsh-4.15.2-source.tgz src/occt-7_8_1.tar.gz build-wheel.sh dist/
+        run: bash build-wheel.sh --fetch-only
 
+      # The release is assembled from files named one by one, and the wheel must hash to what
+      # the reproduce job compared across both builds, or nothing is published.
       - name: Create the draft release, attach the files, then publish it
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          cd dist
-          shopt -s nullglob
-          wheels=(*.whl)
-          if [ "${#wheels[@]}" -ne 1 ]; then
-            echo "::error::Expected one wheel, got ${#wheels[@]}."
+          stage="$RUNNER_TEMP/release"
+          mkdir "$stage"
+          cp "wheel/$WHEEL" logs/a/build-a.log logs/b/build-b.log \
+            src/gmsh-4.15.2-source.tgz src/occt-7_8_1.tar.gz build-wheel.sh "$stage/"
+          cd "$stage"
+          wheel_sha=$(sha256sum < "$WHEEL" | cut -d' ' -f1)
+          if [ -z "$VERIFIED_SHA256" ] || [ "$wheel_sha" != "$VERIFIED_SHA256" ]; then
+            echo "::error::The wheel to publish hashes to $wheel_sha, but the reproduce job verified '$VERIFIED_SHA256'. Nothing is published."
             exit 1
           fi
-          wheel=${wheels[0]}
-          files=("$wheel" build-a.log build-b.log gmsh-4.15.2-source.tgz occt-7_8_1.tar.gz build-wheel.sh)
+          files=("$WHEEL" build-a.log build-b.log gmsh-4.15.2-source.tgz occt-7_8_1.tar.gz build-wheel.sh)
           sha256sum "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
-          wheel_sha=$(sha256sum < "$wheel" | cut -d' ' -f1)
-          url="$GITHUB_SERVER_URL/$GH_REPO/releases/download/$TAG/$wheel"
+          url="$GITHUB_SERVER_URL/$GH_REPO/releases/download/$TAG/$WHEEL"
           {
             echo "gmsh 4.15.2 for Linux aarch64, built from the attached sources by build-wheel.sh."
             echo
@@ -260,7 +286,7 @@ jobs:
             echo
             echo "    docker run --rm -e JOBS=4 -v \"\$PWD\":/work -w /work $IMAGE bash build-wheel.sh"
             echo
-            echo "gmsh is licensed under the GPL, version 2 or later, with a linking exception; OpenCASCADE under the LGPL 2.1 with the Open CASCADE exception. The attached tarballs and build-wheel.sh are the corresponding source."
+            echo "gmsh is licensed under the GPL, version 2 or later, with a linking exception; OpenCASCADE under the LGPL 2.1 with the Open CASCADE exception. The wheel also contains other third-party code under its own terms; share/doc/gmsh/third-party/INVENTORY.txt in the wheel lists each component with its license, and that folder holds the texts. The attached tarballs and build-wheel.sh are the corresponding source."
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" "${files[@]}" SHA256SUMS --draft --target "$GITHUB_SHA" \
             --title "gmsh 4.15.2 for Linux aarch64, build $BUILD" --notes-file "$RUNNER_TEMP/notes.md"

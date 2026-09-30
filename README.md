@@ -16,7 +16,11 @@ What is built:
   `.msh` write.
 
 The build leaves out options StarCube does not use (the FLTK GUI, OpenMP, MED, CGNS, PETSc), so it
-is not identical in features to the PyPI wheels for other platforms.
+is not identical in features to the PyPI wheels for other platforms. It also leaves out gmsh's
+`contrib/untangle`, which this build would never call (its one caller uses the WinslowUntangler
+instead) and two of whose files carry notices that restrict commercial use. The wheel's metadata
+is gmsh's own, unchanged, so its description still suggests `gmsh.fltk.run()`; without FLTK that
+call raises an error, "Fltk not available".
 
 ## How a release is made
 
@@ -26,8 +30,10 @@ with a build number. The workflow:
 1. builds the wheel twice, from cold, on two separate GitHub arm64 runners;
 2. fails if the two wheels differ in any byte;
 3. installs the wheel with pip in a bare `python:3.12-slim` container, and with uv on the runner,
-   and runs `smoke.py` in each;
+   and runs `smoke.py` in each (the container image and uv are both pinned);
 4. creates the release `gmsh-4.15.2-<build>` as a draft, attaches its files, then publishes it.
+   It uploads only files it names, and refuses unless the wheel hashes to exactly what step 2
+   compared.
 
 Immutable releases are turned on for this repository, so once a release is published its tag
 and files cannot change. A later build (for example on a newer manylinux image) gets a new build
@@ -77,11 +83,17 @@ The last line it prints is the wheel's sha256, which should match `SHA256SUMS`. 
 ## Licenses
 
 - gmsh is licensed under the GPL, version 2 or later, with an exception that allows combining it
-  with OpenCASCADE and Netgen (see `LICENSE.txt` in the gmsh sources, also shipped inside the
-  wheel).
+  with Netgen, METIS and OpenCASCADE (see `LICENSE.txt` in the gmsh sources, also shipped inside
+  the wheel).
 - OpenCASCADE Technology is licensed under the LGPL 2.1 with the Open CASCADE exception
   (`LICENSE_LGPL_21.txt` and `OCCT_LGPL_EXCEPTION.txt` in its sources).
-- The wheel contains both, and is distributed under those terms. Each release attaches the exact
-  source tarballs and the build script, as the corresponding source that the GPL asks for.
+- The wheel also bundles other third-party code compiled into gmsh's library, each part under its
+  own license: among them Netgen (LGPL 2.1), METIS (Apache 2.0), tinyobjloader (MIT), ANN, Eigen
+  and Gmm++. The wheel carries all of their license texts and notices in
+  `share/doc/gmsh/third-party/` (installed as `<venv>/share/doc/gmsh/third-party/`), where
+  `INVENTORY.txt` lists every component, where it is in the sources, its license and its files.
+  Step 3 of `build-wheel.sh` writes that folder.
+- Each release attaches the exact source tarballs and the build script, as the corresponding source
+  that the GPL and the LGPL ask for.
 - This repository's own files (the build script, the smoke test and the workflow) are under the
   MIT license in `LICENSE`.
